@@ -205,7 +205,8 @@ async function readFieldPacks(mtp) {
     const key = path + ':' + row.size;
     let bytes = S.packBytes.get(key);
     if (!bytes) {
-      activity(`Reading ${row.name} from the Field, ${index + 1} of ${rows.length}`, index, rows.length, `Read ${rows.length} ${rows.length === 1 ? 'pack' : 'packs'} from the Field`);
+      // One log line for the whole read: the text before the comma names the line.
+      activity(`Reading packs from the Field, ${row.name}, ${index + 1} of ${rows.length}`, index, rows.length, `Read ${rows.length} ${rows.length === 1 ? 'pack' : 'packs'} from the Field`);
       bytes = new Uint8Array(await mtp.get(row.id));
       S.packBytes.set(key, bytes);
     }
