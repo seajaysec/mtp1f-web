@@ -552,6 +552,7 @@ async function replan() {
     await readLocalFacts();
     const links = linkPlan(localFiles(), S.current || {}, S.packKeep, S.clocks[S.deviceKey] || 0);
     S.links = links;
+    for (const item of links.items) if (item.role === 'pack' && S.packMode[item.name] === 'sync' && stashed(item)) delete S.packMode[item.name];
     const room = packRoom();
     if (room.over && packMembers().some((member) => member.localPath && !S.current[member.path])) throw new Refused(limitWords(room));
     const staged = links.items.filter((item) => item.action === 'push' && item.remote && packWant(item) === 'sync');
@@ -570,6 +571,8 @@ async function replan() {
       }
     }
     pairs = S.firmwareRefusal ? packs : staged;
+    const twice = duplicatePackSend(pairs);
+    if (twice) throw new Refused(twice);
     if (S.current && pairs.length) {
       try {
         S.plan = planCopy(pairs.map((item) => ({ remote: item.remote, size: item.size })), S.current, S.space.free);
@@ -812,8 +815,38 @@ async function pullChanges(mtp) {
   return wanted;
 }
 
+// The pack name inside a file, for a local path or a path on the Field.
+function packNameAt(side, path) {
+  if (side === 'remote') { const row = S.current && S.current[path]; return (row && row.header && row.header.name) || ''; }
+  const file = localFiles().find((item) => (item.path || item.name) === path);
+  return (file && file.header && file.header.name) || '';
+}
+// A copy may never leave two files of one pack on the Field: two staged files that hold the same pack, or a staged
+// file whose pack the Field already holds under another file name. Returns the sentence that says which, or ''.
+function duplicatePackSend(pairs) {
+  const dir = packFolder();
+  const leaving = new Set((S.links && S.links.items || []).filter((item) => packWant(item) === 'remove').flatMap((item) => sideCopies(item, 'remote').map((copy) => copy.path)));
+  const seen = new Map();
+  for (const pair of pairs) {
+    if (!(pair.remote || '').toLowerCase().endsWith('.pack')) continue;
+    const name = packNameAt('local', pair.localPath || pair.path || '');
+    if (!name) continue;
+    if (seen.has(name)) return `${spokenName(seen.get(name).split('/').pop())} and ${spokenName(pair.remote.split('/').pop())} are the same pack (${name}). Only one of them can go on the Field.`;
+    seen.set(name, pair.remote);
+    for (const [path, row] of Object.entries(S.current || {})) {
+      if (!row || row.kind !== 'file' || path === pair.remote || leaving.has(path)) continue;
+      if (dir && !path.startsWith(dir + '/')) continue;
+      if (row.header && row.header.name === name) {
+        return `The Field already holds ${name} as ${row.name}. Sending ${pair.remote.split('/').pop()} would put the same pack on it twice.`;
+      }
+    }
+  }
+  return '';
+}
 async function sendFiles(mtp) {
   const routed = S.pairs;
+  const twice = duplicatePackSend(routed);
+  if (twice) throw new Refused(twice);
   const files = new Map(routed.map((p) => [p.remote, p.file]));
   const plan = planCopy(routed.map((p) => ({ remote: p.remote, size: p.size })), S.current, S.space.free);
   for (const name of plan.retire || []) {
@@ -831,6 +864,7 @@ async function sendFiles(mtp) {
     if (remote !== last) last = remote;
     activity(`Sending ${name}, ${index + 1} of ${count}`, done, total, `Sent ${name}`);
   });
+  plan.sent = new Set(plan.items.map((item) => item.remote));
   return plan;
 }
 
@@ -907,8 +941,11 @@ async function run(what) {
   const landed = [];
   const missed = [];
   for (const pair of (plan ? sending : [])) {
+    // The running unit's drive can list a file it has just accepted a moment later, so a file the Field accepted
+    // counts as landed unless the new listing shows it at another size.
     const row = S.current && S.current[pair.remote];
-    if (row && row.kind === 'file' && row.size === pair.size) landed.push(pair);
+    const accepted = !!(plan.sent && plan.sent.has(pair.remote));
+    if (row ? (row.kind === 'file' && row.size === pair.size) : accepted) landed.push(pair);
     else missed.push(pair);
   }
   for (const pair of landed) {
@@ -1128,7 +1165,7 @@ function setPackMode(item, mode) {
 // One press stages every change this page would otherwise ask for row by row, up to the loader's limit.
 function stageableItems() {
   if (viewMode() !== 'both' || S.refusal) return [];
-  return (S.links && S.links.items || []).filter((item) => item.role === 'pack' && !item.held && !wrongOs(item)
+  return (S.links && S.links.items || []).filter((item) => item.role === 'pack' && !item.held && !wrongOs(item) && !stashed(item)
     && (item.action === 'push' || item.action === 'pull') && packWant(item) !== 'sync' && packWant(item) !== 'remove');
 }
 function stageAll() { stageItems(stageableItems(), false).catch(fail); }
@@ -1423,9 +1460,21 @@ function prereqPhrase(row) {
   return 'which is not loading';
 }
 // What the loader would do with this one pack, shown on the pack's own row.
+// One pack held twice on the Field under different file names: the extra file says so, with a way to remove it.
+function fieldTwinNote(item) {
+  if (!S.current || item.role !== 'pack' || !sideCopies(item, 'remote').length) return null;
+  const twins = samePackGroup(item).filter((other) => other !== item && sideCopies(other, 'remote').length);
+  if (!twins.length) return null;
+  const lead = groupLead([item, ...twins]);
+  if (lead === item) return null;
+  return h('div', { class: 'settle-clash' },
+    h('p', { class: 'warn' }, `Same pack as ${lead.name} on the Field. The loader runs only one.`),
+    h('div', { class: 'settle-actions' }, h('button', { class: 'secondary', onclick: () => leavePack(item.name) }, 'Remove it from the Field')));
+}
 function packNotes(item) {
+  const twin = fieldTwinNote(item);
   const report = S.settle;
-  if (!report || !S.current || item.role !== 'pack') return [];
+  if (!report || !S.current || item.role !== 'pack') return twin ? [twin] : [];
   const mine = (row) => row.file === item.name;
   const out = [];
   for (const clash of report.clashes.filter(mine)) {
@@ -1454,6 +1503,7 @@ function packNotes(item) {
       h('div', { class: 'settle-actions' }, settleFix({ ...row, fix: 'omit' }))));
   }
   for (const row of report.aside.filter(mine)) out.push(h('p', { class: 'pack-meta' }, row.sentence));
+  if (twin) out.unshift(twin);
   return out;
 }
 function packLane(links) {
