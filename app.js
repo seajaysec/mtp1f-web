@@ -1,5 +1,5 @@
 import { FieldMTP, FIELD_FILTERS, INSTALL_PRODUCT, isField, FieldBusy, FieldStalled, FieldNotMtp } from './mtp.js';
-import { Refused, MTP_ENTER, inventoryPaths, planCopy, ldrCheck, paddingBytes, linkPlan, mtpDate, volumeKind, fileStamp, clockOffset, isDeviceLog, packHeader, firmwareFacts, firmwareLabel, packIdentity, settlePacks, packLimitFromLog, packSetSize, PACK_LIMIT, knownOs, packsForOtherOs, LOADER_OS } from './volume.js';
+import { Refused, MTP_ENTER, inventoryPaths, planCopy, ldrCheck, paddingBytes, linkPlan, mtpDate, volumeKind, fileStamp, clockOffset, isDeviceLog, packHeader, firmwareFacts, firmwareLabel, packIdentity, settlePacks, packDirectory, packLimitFromLog, packSetSize, PACK_LIMIT, knownOs, packsForOtherOs, LOADER_OS } from './volume.js';
 
 const app = document.getElementById('app');
 // A page that frames this one could steer clicks onto Send or Remove. The host cannot
@@ -194,12 +194,33 @@ async function hashLocalGroups() {
   }
 }
 
+// Every pack in the Field's pack folder is read in the session that lists it, so the set on the unit can be
+// counted and judged against this folder without opening the drive a second time.
+async function readFieldPacks(mtp) {
+  const dir = packDirectory(S.current || {});
+  if (!dir) return;
+  const rows = Object.entries(S.current).filter(([path, row]) => row && row.kind === 'file' && row.id
+    && path.startsWith(dir + '/') && path.toLowerCase().endsWith('.pack'));
+  for (const [index, [path, row]] of rows.entries()) {
+    const key = path + ':' + row.size;
+    let bytes = S.packBytes.get(key);
+    if (!bytes) {
+      activity(`Reading ${row.name} from the Field, ${index + 1} of ${rows.length}`, index, rows.length, `Read ${rows.length} ${rows.length === 1 ? 'pack' : 'packs'} from the Field`);
+      bytes = new Uint8Array(await mtp.get(row.id));
+      S.packBytes.set(key, bytes);
+    }
+    row.bytes = bytes;
+    row.header = packHeader(bytes);
+  }
+}
+
 async function confirmPackBytes(mtp) {
   const jobs = packsToConfirm();
   const locals = localFiles();
   for (const [index, row] of jobs.entries()) {
     activity(`Comparing ${row.name} byte for byte, ${index + 1} of ${jobs.length}`, index, jobs.length, `Compared ${row.name} byte for byte`);
-    row.digest = await sha256(await mtp.get(row.id));
+    const bytes = row.bytes && row.bytes.length === row.size ? row.bytes : await mtp.get(row.id);
+    row.digest = await sha256(bytes);
     for (const file of locals) {
       const same = row.name === 'os.ldr' ? file.name && file.name.toLowerCase().endsWith('.ldr') : file.name === row.name;
       if (!same || file.digest) continue;
@@ -344,7 +365,7 @@ function unitHolds(file) {
 }
 function packMembers() {
   const items = (S.links && S.links.items || []).filter((item) => item.role === 'pack');
-  const connected = !!(S.current && S.installVolume);
+  const connected = !!(S.current && packFolder());
   const out = [];
   for (const item of items) {
     const want = packWant(item);
@@ -370,7 +391,7 @@ function packMembers() {
 // The pack files that will sit in user/pk once this sync is done: what is on the Field and stays, plus what is
 // staged, minus what is staged for removal. Only counted against a Field (the loader's limit is its folder's).
 function packRoom() {
-  const counted = !!(S.current && S.installVolume);
+  const counted = !!(S.current && packFolder());
   const names = counted ? packMembers().filter((member) => !member.path || inPackFolder(member.path)).map((member) => member.file) : [];
   const limit = S.packLimit.limit;
   const count = packSetSize(names);
@@ -426,7 +447,9 @@ async function packBodies() {
       else missing.push(member);
     }
   }
-  if (missing.length && S.device) {
+  // The running unit's drive is read once, in the connect session (readFieldPacks). Only the boot-menu drive
+  // is opened again here.
+  if (missing.length && S.device && S.installVolume) {
     let mtp;
     try {
       mtp = await FieldMTP.connect(S.device);
@@ -599,7 +622,7 @@ async function replan() {
     S.plan = null;
   }
   S.pairs = S.plan ? pairs : [];
-  if (S.current && !S.installVolume) S.settle = null;
+  if (S.current && !packFolder()) S.settle = null;
   else {
     const bodies = await packBodies();
     S.settle = bodies ? settlePacks(bodies.map((item) => ({ file: item.file, bytes: item.bytes || new Uint8Array(), onUnit: item.onUnit, inFolder: item.inFolder })), S.packLimit.limit) : null;
@@ -626,6 +649,7 @@ async function withField(job) {
     if (fieldNow) S.clocks[S.deviceKey] = clockOffset(fieldNow, Date.now());
     await readInventory(mtp, 'Reading the Field');
     await readLoaderLimit(mtp);
+    await readFieldPacks(mtp);
     await confirmPackBytes(mtp);
     await job(mtp);
     hush();
@@ -1274,7 +1298,7 @@ function wrongOs(item) {
 // Packs already on the Field that were built for another OS than the loader's. Loading a new OS is when this
 // matters most: the new loader leaves every one of them out, and they keep using pack slots.
 function staleFieldPacks() {
-  if (!S.current || !S.installVolume) return [];
+  if (!S.current || !packFolder()) return [];
   const remote = (S.links && S.links.items || []).filter((item) => item.role === 'pack' && sideCopies(item, 'remote').length && packWant(item) !== 'remove'
     && !sideCopies(item, 'local').some((copy) => copy.os === LOADER_OS));
   const rows = remote.map((item) => {
