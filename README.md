@@ -20,8 +20,8 @@ python3 -m http.server 8755 --bind 127.0.0.1
 
 Open [http://127.0.0.1:8755](http://127.0.0.1:8755). Chrome will not offer a USB device from a page opened as a file.
 
-1. Connect the unit and press **Connect**. A unit that is running is asked to share its drive.
-2. Press **Choose folder** and pick the folder on this computer.
+1. Press **Choose folder** and pick the folder on this computer. **Connect** appears once a folder is chosen.
+2. Connect the unit and press **Connect**. A unit that is running is asked to share its drive.
 3. Press **Stage** on each pack you want copied, or **Stage all** for everything that is new or newer here. New logs on the unit are staged for you; nothing else is. **Staged** means it is waiting. Press it again to take it back.
 4. Press **Send**. That is the copy.
 

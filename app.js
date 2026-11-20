@@ -670,8 +670,12 @@ async function askForMtp() {
 // The button starts this. It never runs on load. A permitted boot-menu volume
 // opens at once. Anything else gets one MTP request over MIDI, then USB is
 // watched until five seconds from the click.
+// Without a folder to compare against, a connected Field has nothing to be compared with. The folder comes first.
+function needsFolder() {
+  return !!window.showDirectoryPicker && !(S.dir && S.dirAllowed);
+}
 async function look() {
-  if (S.looking) return;
+  if (S.looking || needsFolder()) return;
   S.looking = true;
   S.sentMidi = false;
   S.phase = 'looking';
@@ -1532,7 +1536,8 @@ function actions() {
   const row = [];
   if (S.phase === 'chrome') return null;
   if (!S.current || ['plug', 'busy', 'stalled', 'console', 'error', 'looking'].includes(S.phase)) {
-    row.push(h('button', { class: 'primary', disabled: S.phase === 'looking', onclick: () => look().catch(fail) },
+    if (needsFolder()) row.push(h('button', { class: 'primary', onclick: onFolderClick }, 'Choose folder'));
+    else row.push(h('button', { class: 'primary', disabled: S.phase === 'looking', onclick: () => look().catch(fail) },
       S.phase === 'looking' ? 'Looking' : S.phase === 'busy' ? 'Try again' : 'Connect'));
   } else {
     const comparing = viewMode() === 'both';
@@ -1561,7 +1566,7 @@ function actions() {
     ? h('button', { class: 'secondary', onclick: onFolderClick }, S.dir && S.dirAllowed ? 'Change folder' : 'Choose folder') : null;
   const menu = [];
   if (S.current && S.phase === 'ready') menu.push(h('button', { class: 'secondary', disabled: busy, onclick: () => disconnect().catch(fail) }, 'Disconnect'));
-  if (S.current) menu.push(folderButton); else row.push(folderButton);
+  if (S.current) menu.push(folderButton); else if (!needsFolder()) row.push(folderButton);
   if (S.dropped.size) menu.push(h('button', { class: 'secondary', disabled: busy, onclick: () => { S.dropped.clear(); S.menuOpen = false; replan(); } }, 'Clear dropped'));
   if (window.showDirectoryPicker && S.dirName && S.dirAllowed) {
     const path = (S.dir && typeof S.dir.path === 'string' && S.dir.path) || S.dirPath || `${S.dirName}/`;
