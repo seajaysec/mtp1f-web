@@ -877,6 +877,7 @@ function isLogName(name, path) {
 }
 
 const osOfHeader = (header) => (header ? knownOs(header.firmware) : '');
+const versionOfHeader = (header) => (header && Number.isInteger(header.version) ? header.version : null);
 
 // One group per file name. Packs, firmware and logs all use this.
 function namedCopies(files, current, acceptLocal, acceptRemote, offset = 0) {
@@ -890,7 +891,7 @@ function namedCopies(files, current, acceptLocal, acceptRemote, offset = 0) {
     add(file.name, {
       side: 'local', path: file.path || file.name, size: file.size,
       created: file.created || 0, modified: file.modified || 0, added: file.added || 0,
-      digest: file.digest || '', file, os: osOfHeader(file.header),
+      digest: file.digest || '', file, os: osOfHeader(file.header), version: versionOfHeader(file.header),
     });
   }
   for (const [path, row] of Object.entries(current || {})) {
@@ -899,7 +900,7 @@ function namedCopies(files, current, acceptLocal, acceptRemote, offset = 0) {
     add(row.name || baseName(path), {
       side: 'remote', path, size: row.size,
       created: timed.created || 0, modified: timed.modified || 0, added: timed.added || 0,
-      digest: row.digest || '', file: null, os: osOfHeader(row.header),
+      digest: row.digest || '', file: null, os: osOfHeader(row.header), version: versionOfHeader(row.header),
     });
   }
   for (const copies of groups.values()) {
@@ -971,6 +972,8 @@ function sameFile(a, b) {
   if (!a || !b || b.missing) return false;
   // A copied pack keeps the Field's own clock, so the later stamp can be the same bytes.
   if (a.digest && b.digest && a.digest === b.digest) return true;
+  // Two builds of different versions are never the same file, whatever their sizes and dates.
+  if (Number.isInteger(a.version) && Number.isInteger(b.version) && a.version !== b.version) return false;
   if (a.size !== b.size) return false;
   if (a.stamp && b.stamp && Math.abs(a.stamp - b.stamp) >= 2000) return false;
   return true;
@@ -985,7 +988,7 @@ function publicCopy(copy) {
   return {
     side: copy.side, path: copy.path, size: copy.size, stamp: copy.stamp || 0,
     created: copy.created || 0, modified: copy.modified || 0, added: copy.added || 0,
-    digest: copy.digest || '', os: copy.os || '',
+    digest: copy.digest || '', os: copy.os || '', version: copy.version == null ? null : copy.version,
   };
 }
 
@@ -1001,10 +1004,15 @@ function resolvePack(name, copies, choicePath, packDir, options = {}) {
   const setAside = role === 'pack' && fits.some((copy) => copy.os === LOADER_OS) && fits.length < copies.length;
   const eligible = setAside ? fits : copies;
   const vary = copiesVary(eligible);
-  const same = copiesSame(eligible);
   const chosen = (vary || setAside) && choicePath ? copies.find((copy) => copy.path === choicePath) : null;
-  const clash = vary && copiesClash(eligible);
-  const used = chosen || (clash ? null : same ? firstCopy(eligible) : autoWinner(eligible));
+  // A pack's own version says which build is newer. File dates only decide between copies of one version: a copy
+  // sent to the Field takes the Field's clock, so the older build can carry the later date.
+  const versions = eligible.map((copy) => copy.version);
+  const ranked = role === 'pack' && versions.every((v) => Number.isInteger(v)) && new Set(versions).size > 1;
+  const pool = ranked ? eligible.filter((copy) => copy.version === Math.max(...versions)) : eligible;
+  const same = copiesSame(pool);
+  const clash = copiesVary(pool) && copiesClash(pool);
+  const used = chosen || (clash ? null : same ? firstCopy(pool) : autoWinner(pool));
   const stamps = copies.map((copy) => copy.stamp).filter((n) => n > 0);
   let local = null;
   let remote = null;

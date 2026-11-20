@@ -1239,12 +1239,45 @@ function stalePanel() {
 }
 // A pack built for the wrong OS whose own build for the right OS sits in the folder under another name is not
 // shown as a row of its own. It is listed under that build, for anyone who wants to look.
+// Files are grouped by the pack name inside them, not by file name: loopback.pack and loopback-1.7.3.pack can be
+// the same pack. One file of a group is the row; the others are listed under it and are never sent.
+function packNameOf(item) {
+  if (!item || item.role !== 'pack') return '';
+  const header = headerFor(shownCopy(item, 'local') || shownCopy(item, 'remote'));
+  return header ? header.name : '';
+}
+function versionOf(item) {
+  const header = headerFor(shownCopy(item, 'local') || shownCopy(item, 'remote'));
+  return header && Number.isInteger(header.version) ? header.version : -1;
+}
+function samePackGroup(item) {
+  const name = packNameOf(item);
+  if (!name) return [item];
+  return (S.links && S.links.items || []).filter((other) => other.role === 'pack' && packNameOf(other) === name);
+}
+// The row a group shows: the loader's OS, then the highest version, then the file on the Field, then the plain
+// <name>.pack, then the newest.
+function groupLead(group) {
+  const onField = (item) => sideCopies(item, 'remote').length > 0;
+  const plain = (item) => item.name.toLowerCase() === packNameOf(item).toLowerCase() + '.pack';
+  return group.slice().sort((a, b) => (wrongOs(a) ? 1 : 0) - (wrongOs(b) ? 1 : 0)
+    || versionOf(b) - versionOf(a)
+    || (onField(b) ? 1 : 0) - (onField(a) ? 1 : 0)
+    || (plain(b) ? 1 : 0) - (plain(a) ? 1 : 0)
+    || (b.newest || 0) - (a.newest || 0)
+    || (a.name < b.name ? -1 : 1))[0];
+}
+// A file that is not its group's row is listed under that row. One already on the Field stays a row of its own,
+// so it can be removed.
 function stashed(item) {
-  const wrong = wrongOs(item);
-  return !!(wrong && wrong.twin);
+  if (sideCopies(item, 'remote').length) return false;
+  const group = samePackGroup(item);
+  return group.length > 1 && groupLead(group) !== item;
 }
 function strayBuilds(item) {
-  return (S.links && S.links.items || []).filter((other) => other !== item && stashed(other) && wrongOs(other).twin === item.name);
+  const group = samePackGroup(item);
+  if (group.length < 2 || groupLead(group) !== item) return [];
+  return group.filter((other) => other !== item && stashed(other));
 }
 function buildsOf(item) {
   const seen = [];
@@ -1328,7 +1361,7 @@ function packRow(item) {
         const using = copy.path === (item.chosen || item.usedPath);
         const fresh = copy.stamp && newest - copy.stamp < 2000;
         return h('div', { class: 'copy' + (using ? ' using' : '') + (fresh ? ' fresh' : '') },
-          h('span', { class: 'pack-age' }, (dateKind(copy) || 'no time') + (fresh ? ' · newer' : '') + (copy.os ? ' · OS ' + copy.os : '')),
+          h('span', { class: 'pack-age' }, (dateKind(copy) || 'no time') + (fresh ? ' · newer' : '') + (Number.isInteger(copy.version) ? ' · version ' + copy.version : '') + (copy.os ? ' · OS ' + copy.os : '')),
           shortSha(copy) ? h('span', { class: 'sha', title: copy.digest }, shortSha(copy)) : null,
           h('span', { class: 'copy-path' }, copy.side === 'remote' && impliedDir(copy, item) ? 'Field' : (impliedDir(copy, item) ? 'Local' : dirLabel(copy.path))),
           h('button', {
@@ -1338,7 +1371,7 @@ function packRow(item) {
             onclick: () => keepCopy(item.name, copy.path),
           }, using ? 'Using' : copy.os && copy.os !== LOADER_OS ? 'Wrong OS' : 'Use'));
       }), ...strays.map((stray) => h('div', { class: 'copy' },
-        h('span', { class: 'pack-age' }, stray.name + ' · OS ' + wrongOs(stray).os),
+        h('span', { class: 'pack-age' }, stray.name + ' · version ' + versionOf(stray) + (wrongOs(stray) ? ' · OS ' + wrongOs(stray).os : '')),
         h('span', { class: 'copy-path' }, 'Not used'))) ]));
 }
 
