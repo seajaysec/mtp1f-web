@@ -29,7 +29,7 @@ A hosted copy is at [seajaysec.github.io/mtp1f-web](https://seajaysec.github.io/
 
 ## Packs
 
-`.pack` files are feature files. A row shows a pack's name and version. When the folder holds several builds of one pack, the row shows the one that fits the unit's OS and, among those, the newest. The other builds are behind the copies button on the row, where you can pick one by hand.
+`.pack` files are feature files. A row shows a pack's name and version. When the folder holds several builds of one pack, the row shows the one that fits the unit's OS and, among those, the newest. Newest means the newest date (created, modified or added, with the unit's own clock taken into account), not the highest version number, since a republished pack can start again at version 1. Every pack is compared byte for byte, so a copy on the unit counts as the file it was copied from: its date on the unit is only when it was sent. The other builds are behind the copies button on the row, where you can pick one by hand.
 
 A pack that needs another pack cannot be staged alone. The page offers to stage both, or says that the pack it needs is not in the folder. A pack built for another OS than 1.7.3 is marked **Wrong OS**: the loader leaves it out, so it cannot be staged, and a 1.7.3 build of the same pack in the folder is used instead. Packs already on the unit that were built for another OS are listed, with one button to remove them.
 
@@ -39,7 +39,7 @@ The loader looks at 32 pack files. The page shows 32 slots: blue for packs alrea
 
 ## Removing
 
-A pack on the unit can be removed from the unit from the copies button on its row. When no copy of it is in the chosen folder, the page copies it here first, and with no folder chosen it stays on the unit. A different file of the same name is left where it is, and the unit's copy is written beside it.
+A pack on the unit can be removed from the unit from the copies button on its row. Staging a pack that the unit already holds under another file name also stages that file's removal, since the new file replaces it; unstaging puts it back. Before any file on the unit is removed or replaced, the page copies it here unless the folder already holds those exact bytes, so nothing that only the unit has is lost. With no folder chosen, it stays on the unit. A different file of the same name is left where it is, and the unit's copy is written beside it.
 
 ## Firmware and logs
 

@@ -16,7 +16,7 @@ const S = {
   activity: [], firmwareFacts: { local: [], field: null }, packBytes: new Map(), settle: null,
   installVolume: false, links: null, folderError: '',
   looking: false, sentMidi: false,
-  packLimit: { limit: PACK_LIMIT, source: 'known' }, dialog: null, quiet: false, packMode: {}, packKeep: {}, packSettled: new Map(), receipts: new Map(), packShow: { changes: true, same: true, conflicts: true },
+  packLimit: { limit: PACK_LIMIT, source: 'known' }, dialog: null, quiet: false, packMode: {}, packKeep: {}, replaces: {}, packSettled: new Map(), receipts: new Map(), packShow: { changes: true, same: true, conflicts: true },
   packQuery: '', openPack: null, packScroll: 0, packFocus: false, packCaret: 0, clocks: {}, deviceKey: '', headline: '', rebootNames: new Set(),
   dirName: (() => { try { return localStorage.getItem('field-folder-name'); } catch { return null; } })(),
 };
@@ -186,7 +186,8 @@ async function hashLocalGroups() {
     else if (lower.endsWith('.ldr')) add('os.ldr', file);
     else if (isLogFile(file)) add(file.name, file);
   }
-  const pending = [...groups.values()].filter((group) => group.length > 1).flat().filter((file) => !file.digest);
+  // Every pack is hashed: a Field copy takes the age of the folder file with its bytes, so each needs a hash.
+  const pending = [...groups.entries()].filter(([key, group]) => group.length > 1 || key.toLowerCase().endsWith('.pack')).map(([, group]) => group).flat().filter((file) => !file.digest);
   for (const [index, file] of pending.entries()) {
     if (!S.quiet) { S.progress = { label: 'Checking ' + file.name, done: index, total: pending.length }; render(); }
     const blob = file.file || file;
@@ -212,6 +213,7 @@ async function readFieldPacks(mtp) {
     }
     row.bytes = bytes;
     row.header = packHeader(bytes);
+    row.digest = await sha256(bytes);
   }
 }
 
@@ -320,6 +322,7 @@ async function readInventory(mtp, label) {
   activity(label, 0, 1, label);
   // The finished line says what was found, so a finished read never looks like one still running.
   const rows = await mtp.inventory((done, total) => activity(`${label}, ${done} of ${total}`, done, total, `Listed ${total} ${total === 1 ? 'item' : 'items'} on the Field`));
+  await mtp.readAdded(rows.filter((row) => row.kind === 'file' && /\.(pack|ldr|txt)$/i.test(row.name || '')));
   for (const row of rows) {
     row.created = mtpDate(row.created);
     row.modified = mtpDate(row.modified);
@@ -464,6 +467,7 @@ async function packBodies() {
         S.packBytes.set(member.path + ':' + row.size, bytes);
         row.header = packHeader(bytes);
         row.bytes = bytes;
+        row.digest = await sha256(bytes);
       }
       hush();
       await mtp.close();
@@ -538,7 +542,7 @@ async function stageItems(startItems, ask) {
     for (const name of list) {
       const room = packRoom();
       if (room.counted && !room.names.has(name.toLowerCase()) && room.count >= room.limit) { skipped += 1; continue; }
-      S.packMode[name] = 'sync';
+      stageOne(name);
     }
     S.message = ''; S.headline = ''; S.activity = [];
     replanQuiet().catch(fail);
@@ -564,6 +568,30 @@ async function stageItems(startItems, ask) {
   if (blocked.length) {
     showDialog(`Not staged, because what they need isn't in this folder: ${joinNames(blocked.map((row) => `${spoken(row.file)} (needs ${row.needName})`))}.`, [{ label: 'OK' }]);
   } else if (skipped) showLimit();
+}
+// The files on the Field that hold the same pack as `name` under another file name. Sending `name` replaces them,
+// so staging it stages their removal too, and unstaging it puts them back. A removed file is copied to the folder
+// first when the folder does not already hold its bytes (deletePacks).
+function fieldTwins(name) {
+  const item = (S.links && S.links.items || []).find((row) => row.name === name);
+  if (!item || item.role !== 'pack') return [];
+  return samePackGroup(item).filter((other) => other !== item && sideCopies(other, 'remote').some((copy) => inPackFolder(copy.path)));
+}
+function stageOne(name) {
+  S.packMode[name] = 'sync';
+  for (const twin of fieldTwins(name)) {
+    if (packWant(twin) === 'remove') continue;
+    S.packMode[twin.name] = 'remove';
+    S.replaces[twin.name] = name;
+  }
+}
+function unstageOne(name) {
+  S.packMode[name] = 'skip';
+  for (const [twin, by] of Object.entries(S.replaces)) {
+    if (by !== name) continue;
+    if (S.packMode[twin] === 'remove') S.packMode[twin] = 'skip';
+    delete S.replaces[twin];
+  }
 }
 function stageNamed(packName) {
   const item = itemForPack(packName);
@@ -646,8 +674,18 @@ async function withField(job) {
     S.info = await mtp.deviceInfo();
     S.deviceKey = (S.info && S.info.serial) || `field-${S.device.productId || 0}`;
     S.space = await mtp.openSession();
+    // Every Field keeps its own clock. Its offset from this computer is measured at each connect, and kept per
+    // unit for a visit where the Field does not answer the clock request.
     const fieldNow = mtpDate(await mtp.deviceTime());
-    if (fieldNow) S.clocks[S.deviceKey] = clockOffset(fieldNow, Date.now());
+    if (fieldNow) {
+      S.clocks[S.deviceKey] = clockOffset(fieldNow, Date.now());
+      try { localStorage.setItem('field-clock:' + S.deviceKey, String(S.clocks[S.deviceKey])); } catch { /* not kept */ }
+    } else if (!(S.deviceKey in S.clocks)) {
+      try {
+        const kept = Number(localStorage.getItem('field-clock:' + S.deviceKey));
+        if (Number.isFinite(kept) && kept) S.clocks[S.deviceKey] = kept;
+      } catch { /* none kept */ }
+    }
     await readInventory(mtp, 'Reading the Field');
     await readLoaderLimit(mtp);
     await readFieldPacks(mtp);
@@ -913,11 +951,32 @@ function bytesMatch(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
-async function heldLocally(name, bytes) {
-  for (const local of localFiles().filter((file) => file.name === name)) {
-    if (await bytesMatch(await fileBytes(local), bytes)) return true;
+// Bytes the folder already holds, under any name and in any subfolder.
+async function heldLocally(bytes) {
+  const digest = await sha256(bytes);
+  for (const local of localFiles()) {
+    if (local.size !== bytes.length) continue;
+    if (local.digest ? local.digest === digest : bytesMatch(await fileBytes(local), bytes)) return true;
   }
   return false;
+}
+// A Field file about to be removed or replaced is copied into the folder first unless the folder already holds
+// its bytes, so nothing that exists only on the Field is lost. Returns true when a copy was made.
+async function keepHome(mtp, path, name, step, total) {
+  const live = S.current[path];
+  if (!live || live.kind !== 'file') return false;
+  let bytes = S.packBytes.get(path + ':' + live.size);
+  if (!bytes) bytes = new Uint8Array(await mtp.get(live.id));
+  if (await heldLocally(bytes)) return false;
+  activity(`Copying ${name} here before it is replaced, ${step + 1} of ${total}`, step, total, `Copied ${name} here`);
+  if (!(await copyHome(name, bytes))) throw new Refused(name + ' is only on the Field. Choose a folder so a copy can be kept on this computer.');
+  S.keptHome = (S.keptHome || 0) + 1;
+  return true;
+}
+// Packs the send will overwrite on the Field.
+async function keepReplaced(mtp) {
+  const replaced = S.pairs.filter((pair) => (pair.remote || '').toLowerCase().endsWith('.pack') && S.current[pair.remote] && S.current[pair.remote].kind === 'file');
+  for (const [index, pair] of replaced.entries()) await keepHome(mtp, pair.remote, pair.remote.split('/').pop(), index, replaced.length);
 }
 async function copyHome(name, bytes) {
   if (!S.dir || !S.dirAllowed) return false;
@@ -941,12 +1000,7 @@ async function deletePacks(mtp) {
     for (const copy of item.copies.filter((row) => row.side === 'remote')) {
       const live = S.current[copy.path];
       if (!live || live.kind !== 'file') continue;
-      let bytes = S.packBytes.get(copy.path + ':' + live.size);
-      if (!bytes) bytes = new Uint8Array(await mtp.get(live.id));
-      if (!(await heldLocally(item.name, bytes))) {
-        activity(`Copying ${item.name} here`, count, doomed.length, `Copied ${item.name} here`);
-        if (!(await copyHome(item.name, bytes))) throw new Refused(item.name + ' is only on the Field. Choose a folder so a copy can be kept on this computer.');
-      }
+      await keepHome(mtp, copy.path, copy.path.split('/').pop(), count, doomed.length);
       activity(`Removing ${copy.path}`, count, doomed.length, `Removed ${copy.path}`);
       await mtp.remove(live.id);
       freed += live.size || 0;
@@ -963,10 +1017,13 @@ async function run(what) {
   S.phase = 'working'; S.refusal = null; S.message = ''; S.headline = ''; S.rebootNames = new Set();
   S.activity = []; S.progress = null; render();
   let pulled = [], removed = 0, plan = null;
+  S.replaces = {};
   const sending = S.pairs.slice();
   const isPack = (pair) => pair.role === 'pack' || (pair.remote || '').toLowerCase().endsWith('.pack');
+  S.keptHome = 0;
   const ok = await withField(async (mtp) => {
     removed = await deletePacks(mtp);
+    if (what !== 'pull' && sending.length) await keepReplaced(mtp);
     if (what !== 'send') pulled = await pullChanges(mtp);
     if (what !== 'pull' && sending.length) plan = await sendFiles(mtp);
     await readInventory(mtp, 'Checking the Field');
@@ -999,6 +1056,7 @@ async function run(what) {
   if (landed.length) bits.push('Sent ' + [sentFirmware ? 'firmware' : '', sentPacks ? plural(sentPacks, 'pack') : ''].filter(Boolean).join(' and '));
   if (pulled.length) bits.push('Copied ' + [logsCopied ? plural(logsCopied, 'log') : '', packsCopied ? plural(packsCopied, 'pack') : ''].filter(Boolean).join(' and ') + ' here');
   if (removed) bits.push(`Removed ${plural(removed, 'pack')}`);
+  if (S.keptHome) bits.push(`Kept ${plural(S.keptHome, 'file')} that only the Field had, in your folder`);
   if (missed.length) bits.push((missed.length > 3 ? plural(missed.length, 'file') : joinNames(missed.map((pair) => spokenName(pair.name)))) + ' did not land');
   const fresh = landed.filter(isPack);
   S.rebootNames = new Set(fresh.map((pair) => pair.name));
@@ -1027,7 +1085,6 @@ const WORDS = {
 
 
 function copyStatus() {
-  const busy = ['working', 'reading', 'looking'].includes(S.phase);
   const done = (S.activity || []).filter((row) => row.state === 'done' || row.state === 'now');
   if (!S.progress && !done.length) return null;
   // The label and bar always take their space, so the block does not change size as a copy starts and ends.
@@ -1161,11 +1218,12 @@ function shownCopy(item, side) {
   const copies = sideCopies(item, side);
   if (!copies.length) return null;
   const picked = item.chosen || item.usedPath;
-  return copies.find((copy) => copy.path === picked)
-    || copies.slice().sort((a, b) => (b.stamp || 0) - (a.stamp || 0) || (a.path < b.path ? -1 : 1))[0];
+  return copies.find((copy) => copy.path === picked) || copies.find((copy) => copy.using)
+    || copies.slice().sort((a, b) => (b.age || 0) - (a.age || 0) || (a.path < b.path ? -1 : 1))[0];
 }
+// Ages, not file dates: a copy on the Field holding bytes from the folder is as old as that folder file.
 function isNewer(copy, other) {
-  return !!(copy && other && copy.stamp && other.stamp && copy.stamp > other.stamp + 2000);
+  return !!(copy && other && copy.age && other.age && copy.age > other.age + 2000);
 }
 function needsReboot(item) {
   return !!(item && item.role === 'pack' && item.action === 'same' && S.rebootNames && S.rebootNames.has(item.name));
@@ -1190,7 +1248,12 @@ function packShown(item, query) {
 function setPackMode(item, mode) {
   if (mode === 'sync' && item.role === 'pack' && wrongOs(item)) return;
   if (mode === 'sync' && item.role === 'pack' && packWant(item) !== 'sync') { stageItems([item], true).catch(fail); return; }
-  S.packMode[item.name] = packWant(item) === mode ? 'skip' : mode;
+  if (mode === 'sync' && packWant(item) === 'sync') unstageOne(item.name);
+  else {
+    // A file removed because a staged file replaces it stops being that file's replacement once chosen by hand.
+    delete S.replaces[item.name];
+    S.packMode[item.name] = packWant(item) === mode ? 'skip' : mode;
+  }
   S.message = '';
   S.headline = '';
   S.activity = [];
@@ -1207,14 +1270,14 @@ function stagedItems() {
   return (S.links && S.links.items || []).filter((item) => item.role === 'pack' && (item.action === 'push' || item.action === 'pull') && packWant(item) === 'sync');
 }
 function unstageAll() {
-  for (const item of stagedItems()) S.packMode[item.name] = 'skip';
+  for (const item of stagedItems()) unstageOne(item.name);
   S.message = ''; S.headline = ''; S.activity = [];
   replanQuiet().catch(fail);
 }
 function keepCopy(name, path) {
   if (S.packMode[name] !== 'sync' && refuseIfFull(name)) return;
   S.packKeep[name] = path;
-  S.packMode[name] = 'sync';
+  stageOne(name);
   S.openPack = name;
   replanQuiet().catch(fail);
 }
@@ -1341,16 +1404,17 @@ function samePackGroup(item) {
   if (!name) return [item];
   return (S.links && S.links.items || []).filter((other) => other.role === 'pack' && packNameOf(other) === name);
 }
-// The row a group shows: the loader's OS, then the highest version, then the file on the Field, then the plain
-// <name>.pack, then the newest.
+// The row a group shows: the loader's OS, then the newest content (versions restart when a pack is republished,
+// so the number only breaks a tie), then the highest version, then the file on the Field, then the plain <name>.pack.
 function groupLead(group) {
   const onField = (item) => sideCopies(item, 'remote').length > 0;
   const plain = (item) => item.name.toLowerCase() === packNameOf(item).toLowerCase() + '.pack';
+  const age = (item) => item.age || 0;
   return group.slice().sort((a, b) => (wrongOs(a) ? 1 : 0) - (wrongOs(b) ? 1 : 0)
+    || (Math.abs(age(b) - age(a)) >= 2000 ? age(b) - age(a) : 0)
     || versionOf(b) - versionOf(a)
     || (onField(b) ? 1 : 0) - (onField(a) ? 1 : 0)
     || (plain(b) ? 1 : 0) - (plain(a) ? 1 : 0)
-    || (b.newest || 0) - (a.newest || 0)
     || (a.name < b.name ? -1 : 1))[0];
 }
 // A file that is not its group's row is listed under that row. One already on the Field stays a row of its own,
@@ -1364,17 +1428,6 @@ function strayBuilds(item) {
   const group = samePackGroup(item);
   if (group.length < 2 || groupLead(group) !== item) return [];
   return group.filter((other) => other !== item && stashed(other));
-}
-function buildsOf(item) {
-  const seen = [];
-  for (const copy of item.copies || []) {
-    const header = headerFor(copy);
-    if (!header) continue;
-    const id = packIdentity(header, null);
-    const key = [id.os, id.version, id.interface].join('|');
-    if (!seen.some((row) => row.key === key)) seen.push({ key, id });
-  }
-  return seen;
 }
 function firmwareLine() {
   const facts = S.firmwareFacts || { local: [], field: null };
@@ -1400,13 +1453,11 @@ function packRow(item) {
   const want = packWant(item);
   const open = S.openPack === item.name;
   const hasRemote = mode !== 'local' && item.copies.some((copy) => copy.side === 'remote');
-  const local = shownCopy(item, 'local');
-  const remote = shownCopy(item, 'remote');
   const [tone] = statusOf(item);
   const blocked = item.role === 'firmware' ? (S.refusal || S.firmwareRefusal) : S.refusal;
   const canSync = mode === 'both' && !item.held && !blocked && !wrongOs(item) && (item.action === 'push' || item.action === 'pull');
   const sentence = packSentence(item);
-  const newest = Math.max(0, ...item.copies.map((copy) => copy.stamp || 0));
+  const newest = Math.max(0, ...item.copies.map((copy) => copy.age || 0));
   const notes = packNotes(item);
   const strays = strayBuilds(item);
   const details = item.choose || item.others || strays.length || (hasRemote && item.role === 'pack');
@@ -1442,10 +1493,10 @@ function packRow(item) {
         }, want === 'sync' ? 'Staged' : 'Stage') : null)),
     notes.length ? h('div', { class: 'pack-notes' }, notes) : null,
     open && details && h('div', { class: 'copies-list' }, [...item.copies
-      .slice().sort((a, b) => (b.stamp || 0) - (a.stamp || 0) || (a.path < b.path ? -1 : 1))
+      .slice().sort((a, b) => (b.age || 0) - (a.age || 0) || (b.stamp || 0) - (a.stamp || 0) || (a.path < b.path ? -1 : 1))
       .map((copy) => {
         const using = copy.path === (item.chosen || item.usedPath);
-        const fresh = copy.stamp && newest - copy.stamp < 2000;
+        const fresh = copy.age && newest - copy.age < 2000;
         return h('div', { class: 'copy' + (using ? ' using' : '') + (fresh ? ' fresh' : '') },
           h('span', { class: 'pack-age' }, (dateKind(copy) || 'no time') + (fresh ? ' · newer' : '') + (Number.isInteger(copy.version) ? ' · version ' + copy.version : '') + (copy.os ? ' · OS ' + copy.os : '')),
           shortSha(copy) ? h('span', { class: 'sha', title: copy.digest }, shortSha(copy)) : null,
@@ -1474,12 +1525,6 @@ function settleFix(row) {
     : "Don't send";
   return h('button', { class: 'secondary', onclick: () => leavePack(row.file) }, label);
 }
-// What is true of the whole set: the start screen the loader would show, and how far to trust the prediction.
-function settlePanel() {
-  const report = S.settle;
-  if (!report || !S.current) return null;
-  return null;
-}
 // The pack a left-out pack needs, named in the loader's own sentence ("it needs the base pack, ...").
 function neededName(row) {
   const found = /needs the (.+?) pack/.exec(row.sentence || '');
@@ -1496,7 +1541,7 @@ function prereqPhrase(row) {
 // What the loader would do with this one pack, shown on the pack's own row.
 // One pack held twice on the Field under different file names: the extra file says so, with a way to remove it.
 function fieldTwinNote(item) {
-  if (!S.current || item.role !== 'pack' || !sideCopies(item, 'remote').length) return null;
+  if (!S.current || item.role !== 'pack' || !sideCopies(item, 'remote').length || packWant(item) === 'remove') return null;
   const twins = samePackGroup(item).filter((other) => other !== item && sideCopies(other, 'remote').length);
   if (!twins.length) return null;
   const lead = groupLead([item, ...twins]);
@@ -1554,11 +1599,9 @@ function packLane(links) {
     'aria-pressed': S.packShow[key] ? 'true' : 'false',
     onclick: () => { S.packShow[key] = !S.packShow[key]; render(); },
   }, `${label} ${counts[key]}`);
-  const room = packRoom();
   const mode = viewMode();
   const stageable = stageableItems();
-  const overview = [settlePanel(), stalePanel(),
-  ].filter(Boolean);
+  const overview = [stalePanel()].filter(Boolean);
   const title = mode === 'both' ? 'This computer and the Field' : mode === 'field' ? 'On the Field' : 'Packs';
   return h('div', { class: 'lane packs mode-' + mode },
     h('div', { class: 'pack-head' },
@@ -1688,7 +1731,7 @@ function actions() {
     const label = removes && !pushes && !pulls ? (rescues ? 'Copy here, then remove from the Field' : 'Remove from the Field')
       : firmware && packCount ? `Send firmware and ${packCount === 1 ? '1 pack' : packCount + ' packs'}`
       : firmware ? 'Send firmware'
-      : packCount && !pulls ? (packCount === 1 ? 'Send 1 pack' : `Send ${packCount} packs`)
+      : packCount && !pulls ? (packCount === 1 ? 'Send 1 pack' : `Send ${packCount} packs`) + (removes ? ', remove ' + plainCount(packItems.filter((item) => packWant(item) === 'remove').length) : '')
       : 'Sync changes';
     // Only a problem with something being sent blocks sending; old packs already on the Field do not.
     const sending = new Set(packItems.filter((item) => packWant(item) === 'sync').map((item) => item.name));
@@ -1701,7 +1744,7 @@ function actions() {
   const folderButton = window.showDirectoryPicker
     ? h('button', { class: 'secondary', onclick: onFolderClick }, S.dir && S.dirAllowed ? 'Change folder' : 'Choose folder') : null;
   const menu = [];
-  if (S.current && S.phase === 'ready') menu.push(h('button', { class: 'secondary', disabled: busy, onclick: () => disconnect().catch(fail) }, 'Disconnect'));
+  if (S.current && ['ready', 'stalled', 'busy'].includes(S.phase)) row.push(h('button', { class: 'secondary', disabled: busy, onclick: () => disconnect().catch(fail) }, 'Disconnect'));
   if (S.current) menu.push(folderButton); else if (!needsFolder()) row.push(folderButton);
   if (S.dropped.size) menu.push(h('button', { class: 'secondary', disabled: busy, onclick: () => { S.dropped.clear(); S.menuOpen = false; replan(); } }, 'Clear dropped'));
   if (window.showDirectoryPicker && S.dirName && S.dirAllowed) {
@@ -1717,6 +1760,8 @@ function actions() {
   }
   return h('div', { class: 'actions' }, row);
 }
+
+function plainCount(n) { return n === 1 ? '1 pack' : n + ' packs'; }
 
 function fail(error) {
   if (error && error.name === 'NotFoundError') return render();   // chooser closed

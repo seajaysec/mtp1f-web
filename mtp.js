@@ -12,7 +12,7 @@ export const isField = isOp1Usb;
 const ROOT_HANDLE = 0xffffffff;
 const OP = {
   GetDeviceInfo: 0x1001, OpenSession: 0x1002, CloseSession: 0x1003, GetStorageIDs: 0x1004,
-  GetDevicePropValue: 0x1015,
+  GetDevicePropValue: 0x1015, GetObjectPropsSupported: 0x9801, GetObjectPropValue: 0x9803,
   GetStorageInfo: 0x1005, GetObjectHandles: 0x1007,   GetObjectInfo: 0x1008, GetObject: 0x1009, GetPartialObject: 0x101b,
   DeleteObject: 0x100b, SendObjectInfo: 0x100c, SendObject: 0x100d,
 };
@@ -247,6 +247,9 @@ export class FieldMTP {
     let at = 8;
     [, at] = readString(view, at);
     at += 2;
+    // The first list is the operations the device answers; the page asks for an optional one only when listed.
+    const count = u32(view, at);
+    this.operations = new Set(Array.from({ length: count }, (_, i) => view.getUint16(at + 4 + 2 * i, true)));
     for (let i = 0; i < 5; i++) at += 4 + 2 * u32(view, at);
     let manufacturer, model, version, serial;
     [manufacturer, at] = readString(view, at);
@@ -265,6 +268,30 @@ export class FieldMTP {
       return text || null;
     } catch {
       return null;
+    }
+  }
+
+  // MTP DateAdded (0xDC4E), for the rows given, where the device has it. The Field (checked 2026-11-20) lists the
+  // property calls but not DateAdded among a file's properties, so there it costs one request and nothing is read.
+  async readAdded(rows) {
+    if (!rows.length || !this.operations || !this.operations.has(OP.GetObjectPropsSupported) || !this.operations.has(OP.GetObjectPropValue)) return;
+    let listed;
+    try {
+      const { data } = await this.transact(OP.GetObjectPropsSupported, [FORMAT_UNDEFINED], 'properties', { dataIn: true });
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      listed = Array.from({ length: u32(view, 0) }, (_, i) => view.getUint16(4 + 2 * i, true));
+    } catch (error) {
+      if (error instanceof FieldRefused) return;
+      throw error;
+    }
+    if (!listed.includes(0xdc4e)) return;
+    for (const row of rows) {
+      try {
+        const { data } = await this.transact(OP.GetObjectPropValue, [row.id, 0xdc4e], 'date added', { dataIn: true });
+        if (data && data.byteLength) row.added = readString(new DataView(data.buffer, data.byteOffset, data.byteLength), 0)[0] || null;
+      } catch (error) {
+        if (!(error instanceof FieldRefused)) throw error;
+      }
     }
   }
 

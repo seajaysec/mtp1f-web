@@ -922,34 +922,9 @@ export function copiesVary(copies) {
   return digests.length === copies.length && new Set(digests).size > 1;
 }
 
-// Every copy shares one SHA-256. The first one found is enough.
-export function copiesSame(copies) {
-  if (!copies || copies.length < 2) return false;
-  if (new Set(copies.map((copy) => copy.size)).size > 1) return false;
-  const digests = copies.map((copy) => copy.digest).filter(Boolean);
-  return digests.length === copies.length && new Set(digests).size === 1;
-}
-
-function copiesClash(copies) {
-  const stamped = copies.filter((copy) => copy.stamp > 0);
-  const pool = stamped.length ? stamped.filter((copy) => copy.stamp >= Math.max(...stamped.map((item) => item.stamp)) - 1999) : copies;
-  return new Set(pool.map((copy) => copy.size)).size > 1
-    || copies.some((copy) => !copy.stamp && pool.some((item) => item.stamp && item.size !== copy.size));
-}
-
 function preferCopy(copies) {
   const score = (copy) => (copy.path === `packs/${copy.path.split('/').pop()}` || copy.path.startsWith('packs/') ? 0 : copy.side === 'remote' ? 1 : 2);
   return copies.slice().sort((a, b) => score(a) - score(b) || (a.path < b.path ? -1 : 1))[0];
-}
-
-// The newest dated copy wins. A tie of the same size is one pack. Different sizes
-// at that date, or different sizes with no dates, have no winner.
-function autoWinner(copies) {
-  if (copiesClash(copies)) return null;
-  const stamped = copies.filter((copy) => copy.stamp > 0);
-  if (!stamped.length) return preferCopy(copies);
-  const newest = Math.max(...stamped.map((copy) => copy.stamp));
-  return preferCopy(stamped.filter((copy) => newest - copy.stamp < 2000));
 }
 
 function remoteTarget(remotes, packDir, name) {
@@ -968,28 +943,63 @@ function localTarget(locals) {
   return locals.slice().sort((a, b) => b.stamp - a.stamp || score(a) - score(b) || (a.path < b.path ? -1 : 1))[0];
 }
 
-function sameFile(a, b) {
-  if (!a || !b || b.missing) return false;
-  // A copied pack keeps the Field's own clock, so the later stamp can be the same bytes.
-  if (a.digest && b.digest && a.digest === b.digest) return true;
-  // Two builds of different versions are never the same file, whatever their sizes and dates.
-  if (Number.isInteger(a.version) && Number.isInteger(b.version) && a.version !== b.version) return false;
-  if (a.size !== b.size) return false;
-  if (a.stamp && b.stamp && Math.abs(a.stamp - b.stamp) >= 2000) return false;
-  return true;
-}
-
-function firstCopy(copies) {
-  const locals = copies.filter((copy) => copy.side === 'local');
-  return (locals.length ? locals : copies)[0];
-}
-
 function publicCopy(copy) {
   return {
     side: copy.side, path: copy.path, size: copy.size, stamp: copy.stamp || 0,
     created: copy.created || 0, modified: copy.modified || 0, added: copy.added || 0,
     digest: copy.digest || '', os: copy.os || '', version: copy.version == null ? null : copy.version,
   };
+}
+
+// The same bytes, as far as can be told. Equal SHA-256 is proof and unequal SHA-256 is proof against. Without both
+// hashes, two different versions or sizes are different, two copies of one known version and size are the same
+// build, and otherwise only dates within two seconds count as the same file.
+function sameContent(a, b) {
+  if (a.digest && b.digest) return a.digest === b.digest;
+  if (Number.isInteger(a.version) && Number.isInteger(b.version) && a.version !== b.version) return false;
+  if (a.size !== b.size) return false;
+  if (Number.isInteger(a.version) && Number.isInteger(b.version)) return true;
+  return !!(a.stamp && b.stamp && Math.abs(a.stamp - b.stamp) < 2000);
+}
+
+// Copies holding one content, each with an age. A file's date on the Field is the moment it was sent there, so a
+// content that is also in the folder takes the folder's dates. A content only on the Field keeps the Field's date.
+// Every age is the newest of that side's created, modified and added, already shifted by the device's clock.
+function contentsOf(copies) {
+  const groups = [];
+  for (const copy of copies) {
+    const proven = groups.find((group) => copy.digest && group.some((other) => other.digest === copy.digest));
+    const group = proven || groups.find((g) => g.every((other) => sameContent(copy, other)));
+    if (group) group.push(copy); else groups.push([copy]);
+  }
+  return groups.map((members) => {
+    const locals = members.filter((copy) => copy.side === 'local');
+    const dated = (locals.length ? locals : members).map((copy) => copy.stamp || 0).filter((n) => n > 0);
+    const versions = members.map((copy) => copy.version).filter((v) => Number.isInteger(v));
+    return { members, age: dated.length ? Math.max(...dated) : 0, version: versions.length ? Math.max(...versions) : null };
+  });
+}
+
+// The content to use: the one with the newest age. Contents within two seconds of each other are told apart by
+// the higher version inside them, and failing that the one already on the Field stays. A content with no date is
+// only outranked by a dated one of a lower version when versions are known on both; otherwise there is no winner.
+function newestContent(contents) {
+  if (contents.length === 1) return contents[0];
+  const dated = contents.filter((c) => c.age > 0);
+  const undated = contents.filter((c) => !c.age);
+  let pool = dated.length ? dated.filter((c) => Math.max(...dated.map((d) => d.age)) - c.age < 2000) : contents;
+  if (pool.length > 1 && pool.every((c) => c.version != null)) {
+    const top = Math.max(...pool.map((c) => c.version));
+    pool = pool.filter((c) => c.version === top);
+  }
+  // Different bytes of one age and one version: nothing says which is meant, so the row asks.
+  if (pool.length > 1) return null;
+  const winner = pool[0];
+  if (dated.length && undated.length) {
+    const beaten = undated.every((c) => winner.version != null && c.version != null && c.version <= winner.version);
+    if (!beaten) return null;
+  }
+  return winner;
 }
 
 function resolvePack(name, copies, choicePath, packDir, options = {}) {
@@ -1005,29 +1015,31 @@ function resolvePack(name, copies, choicePath, packDir, options = {}) {
   const eligible = setAside ? fits : copies;
   const vary = copiesVary(eligible);
   const chosen = (vary || setAside) && choicePath ? copies.find((copy) => copy.path === choicePath) : null;
-  // A pack's own version says which build is newer. File dates only decide between copies of one version: a copy
-  // sent to the Field takes the Field's clock, so the older build can carry the later date.
-  const versions = eligible.map((copy) => copy.version);
-  const ranked = role === 'pack' && versions.every((v) => Number.isInteger(v)) && new Set(versions).size > 1;
-  const pool = ranked ? eligible.filter((copy) => copy.version === Math.max(...versions)) : eligible;
-  const same = copiesSame(pool);
-  const clash = copiesVary(pool) && copiesClash(pool);
-  const used = chosen || (clash ? null : same ? firstCopy(pool) : autoWinner(pool));
+  // Newest wins, by content. The version inside a pack only breaks a tie: versions restart when a pack is
+  // republished, so a higher number is not a newer build.
+  const contents = contentsOf(eligible);
+  const ageOf = new Map();
+  for (const content of contentsOf(copies)) for (const copy of content.members) ageOf.set(copy, content.age);
+  const picked = chosen ? contents.find((c) => c.members.includes(chosen)) || { members: [chosen], age: chosen.stamp || 0 } : newestContent(contents);
+  // Identical bytes: the first copy found in the folder is used.
+  const pickedLocal = picked ? picked.members.filter((copy) => copy.side === 'local') : [];
+  const used = chosen || (picked ? (pickedLocal[0] || preferCopy(picked.members)) : null);
   const stamps = copies.map((copy) => copy.stamp).filter((n) => n > 0);
   let local = null;
   let remote = null;
   let action = 'conflict';
   if (used && used.side === 'local') {
     local = used;
-    remote = remoteTarget(remotes, packDir, name);
+    const onField = picked.members.filter((copy) => copy.side === 'remote');
+    remote = (packDir && onField.find((copy) => copy.path === `${packDir}/${name}`)) || onField[0] || remoteTarget(remotes, packDir, name);
     if ((!remote || remote.missing) && options.destination) {
       remote = { side: 'remote', path: options.destination, size: 0, stamp: 0, missing: true };
     }
-    action = remote && !remote.missing && sameFile(used, remote) ? 'same' : 'push';
+    action = remote && !remote.missing && picked.members.includes(remote) ? 'same' : 'push';
   } else if (used) {
     remote = used;
     local = localTarget(locals);
-    action = local && sameFile(used, local) ? 'same' : 'pull';
+    action = local && picked.members.includes(local) ? 'same' : 'pull';
   }
   if (held) {
     action = 'same';
@@ -1043,6 +1055,8 @@ function resolvePack(name, copies, choicePath, packDir, options = {}) {
     created: shown.created || 0,
     added: shown.added || 0,
     stamp: shown.stamp || 0,
+    // The age of the content in use: the folder's dates for bytes the folder holds, the Field's otherwise.
+    age: picked ? picked.age : 0,
     newest: stamps.length ? Math.max(...stamps) : 0,
     oldest: stamps.length ? Math.min(...stamps) : 0,
     file: local ? local.file : null,
@@ -1056,7 +1070,7 @@ function resolvePack(name, copies, choicePath, packDir, options = {}) {
     choose: vary,
     others: setAside ? copies.length - eligible.length : 0,
     chosen: chosen ? chosen.path : null,
-    copies: copies.map(publicCopy),
+    copies: copies.map((copy) => ({ ...publicCopy(copy), age: ageOf.get(copy) || 0, using: !!(picked && picked.members.includes(copy)) })),
   };
 }
 
