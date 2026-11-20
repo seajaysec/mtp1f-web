@@ -1165,8 +1165,6 @@ function packSentence(item) {
   if (wrong) return wrong.twin ? `Superseded by ${wrong.twin}` : 'Will not load';
   if (mode === 'local') return '';
   if (mode === 'field') return sideCopies(item, 'remote').length ? 'On the Field' : 'Only on this computer';
-  if (mode === 'both' && packWant(item) === 'sync' && item.action === 'push' && !item.conflict && !needsReboot(item)) return '';
-  if (mode === 'both' && item.action === 'push' && !item.conflict && !needsReboot(item)) return '';
   if (mode === 'both' && item.role === 'log' && item.action === 'pull' && !item.conflict) return '';
   if (item.conflict && sideCopies(item, 'remote').length && sideCopies(item, 'local').length) return 'Copies differ: choose one';
   if (item.conflict) return sideCopies(item, 'remote').length ? 'Only on the Field' : 'Only on this computer';
