@@ -51,7 +51,7 @@ A copy names the file that is moving and how far through that file it is. After 
 
 ## What is in this repository
 
-The page is `index.html`, `app.js`, `mtp.js`, and `volume.js`. There is no firmware here, original or otherwise, and no copy of a unit's files.
+The page is `index.html`, `style.css`, `app.js`, `mtp.js`, and `volume.js`. There is no firmware here, original or otherwise, and no copy of a unit's files. What the page can and cannot reach is in [SECURITY.md](SECURITY.md).
 
 ## Scope
 

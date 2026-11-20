@@ -2,6 +2,12 @@ import { FieldMTP, FIELD_FILTERS, INSTALL_PRODUCT, isField, FieldBusy, FieldStal
 import { Refused, MTP_ENTER, inventoryPaths, planCopy, ldrCheck, paddingBytes, linkPlan, mtpDate, volumeKind, fileStamp, clockOffset, isDeviceLog, packHeader, firmwareFacts, firmwareLabel, packIdentity, settlePacks, packLimitFromLog, packSetSize, PACK_LIMIT, knownOs, packsForOtherOs, LOADER_OS } from './volume.js';
 
 const app = document.getElementById('app');
+// A page that frames this one could steer clicks onto Send or Remove. The host cannot
+// send frame-ancestors, so the page refuses to run anywhere but its own tab.
+if (window.top !== window.self) {
+  app.textContent = 'MTP-1F runs only in its own tab. Open it directly.';
+  throw new Error('MTP-1F does not run inside a frame');
+}
 const S = {
   phase: navigator.usb ? 'plug' : 'chrome',
   device: null, info: null, space: null, current: null,
@@ -22,6 +28,8 @@ const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'class') el.className = v;
+    // Set through CSSOM: the page's CSP allows no inline style attributes.
+    else if (k === 'style') el.style.cssText = v;
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (v !== false && v != null) el.setAttribute(k, v === true ? '' : v);
   }
@@ -791,7 +799,8 @@ async function writeLocal(name, bytes, folderName, existing) {
     return;
   }
   const a = h('a', { href: URL.createObjectURL(new Blob([bytes])), download: name });
-  a.click(); URL.revokeObjectURL(a.href);
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
 }
 
 async function pullChanges(mtp) {
