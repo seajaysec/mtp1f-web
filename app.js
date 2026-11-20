@@ -288,7 +288,8 @@ async function readLocalFacts() {
 
 async function readInventory(mtp, label) {
   activity(label, 0, 1, label);
-  const rows = await mtp.inventory((done, total) => activity(`${label}, ${done} of ${total}`, done, total, label));
+  // The finished line says what was found, so a finished read never looks like one still running.
+  const rows = await mtp.inventory((done, total) => activity(`${label}, ${done} of ${total}`, done, total, `Listed ${total} ${total === 1 ? 'item' : 'items'} on the Field`));
   for (const row of rows) {
     row.created = mtpDate(row.created);
     row.modified = mtpDate(row.modified);
