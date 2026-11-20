@@ -12,7 +12,7 @@ A file transfer page for the OP-1 Field. It runs in Chrome and talks to the unit
 
 You need Chrome on a computer, a USB cable, and the files you want to copy.
 
-Open the hosted page at [seajaysec.github.io/MTP-1F](https://seajaysec.github.io/MTP-1F/), or run it yourself:
+Open the hosted page at [seajaysec.github.io/MTP1F](https://seajaysec.github.io/MTP1F/), or run it yourself:
 
 ```
 python3 -m http.server 8755 --bind 127.0.0.1

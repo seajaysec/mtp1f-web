@@ -190,7 +190,7 @@ async function confirmPackBytes(mtp) {
   const jobs = packsToConfirm();
   const locals = localFiles();
   for (const [index, row] of jobs.entries()) {
-    activity(`Comparing files byte for byte, ${index + 1} of ${jobs.length}`, index, jobs.length, `Compared ${jobs.length} ${jobs.length === 1 ? 'file' : 'files'} byte for byte`);
+    activity(`Comparing ${row.name} byte for byte, ${index + 1} of ${jobs.length}`, index, jobs.length, `Compared ${row.name} byte for byte`);
     row.digest = await sha256(await mtp.get(row.id));
     for (const file of locals) {
       const same = row.name === 'os.ldr' ? file.name && file.name.toLowerCase().endsWith('.ldr') : file.name === row.name;
@@ -257,7 +257,7 @@ async function readRemoteHeaders(mtp) {
   for (let index = 0; index < packs.length; index++) {
     const [path, row] = packs[index];
     const name = row.name || path;
-    activity(`Reading packs, ${index + 1} of ${packs.length}`, index, packs.length, `Read ${packs.length} ${packs.length === 1 ? 'pack' : 'packs'}`);
+    activity(`Reading ${name}, ${index + 1} of ${packs.length}`, index, packs.length, `Read ${name}`);
     try {
       row.header = packHeader(await mtp.peek(row.id, 96));
     } catch (error) {
@@ -426,7 +426,7 @@ async function packBodies() {
         const member = missing[i];
         const row = S.current[member.path];
         if (!row || !row.id) continue;
-        activity(`Reading packs, ${i + 1} of ${missing.length}`, i, missing.length, `Read ${missing.length} ${missing.length === 1 ? 'pack' : 'packs'}`);
+        activity(`Reading ${member.file}, ${i + 1} of ${missing.length}`, i, missing.length, `Read ${member.file}`);
         const bytes = new Uint8Array(await mtp.get(row.id));
         S.packBytes.set(member.path + ':' + row.size, bytes);
         row.header = packHeader(bytes);
