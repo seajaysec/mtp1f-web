@@ -336,7 +336,7 @@ function unitHolds(file) {
 }
 function packMembers() {
   const items = (S.links && S.links.items || []).filter((item) => item.role === 'pack');
-  const connected = !!(S.current && packFolder());
+  const connected = !!(S.current && S.installVolume);
   const out = [];
   for (const item of items) {
     const want = packWant(item);
@@ -362,7 +362,7 @@ function packMembers() {
 // The pack files that will sit in user/pk once this sync is done: what is on the Field and stays, plus what is
 // staged, minus what is staged for removal. Only counted against a Field (the loader's limit is its folder's).
 function packRoom() {
-  const counted = !!(S.current && packFolder());
+  const counted = !!(S.current && S.installVolume);
   const names = counted ? packMembers().filter((member) => !member.path || inPackFolder(member.path)).map((member) => member.file) : [];
   const limit = S.packLimit.limit;
   const count = packSetSize(names);
@@ -588,7 +588,7 @@ async function replan() {
     S.plan = null;
   }
   S.pairs = S.plan ? pairs : [];
-  if (S.current && !packFolder()) S.settle = null;
+  if (S.current && !S.installVolume) S.settle = null;
   else {
     const bodies = await packBodies();
     S.settle = bodies ? settlePacks(bodies.map((item) => ({ file: item.file, bytes: item.bytes || new Uint8Array(), onUnit: item.onUnit, inFolder: item.inFolder })), S.packLimit.limit) : null;
@@ -1228,7 +1228,7 @@ function wrongOs(item) {
 // Packs already on the Field that were built for another OS than the loader's. Loading a new OS is when this
 // matters most: the new loader leaves every one of them out, and they keep using pack slots.
 function staleFieldPacks() {
-  if (!S.current || !packFolder()) return [];
+  if (!S.current || !S.installVolume) return [];
   const remote = (S.links && S.links.items || []).filter((item) => item.role === 'pack' && sideCopies(item, 'remote').length && packWant(item) !== 'remove'
     && !sideCopies(item, 'local').some((copy) => copy.os === LOADER_OS));
   const rows = remote.map((item) => {
@@ -1583,6 +1583,10 @@ function actions() {
   const busy = ['working', 'reading', 'looking'].includes(S.phase);
   const row = [];
   if (S.phase === 'chrome') return null;
+  // While the Field is being read, nothing can be staged or sent: the plan is not finished.
+  if (S.phase === 'reading' || (S.phase === 'working' && !S.current)) {
+    return h('div', { class: 'actions' }, h('button', { class: 'primary', disabled: 'disabled' }, S.phase === 'reading' ? 'Reading…' : 'Working…'));
+  }
   if (!S.current || ['plug', 'busy', 'stalled', 'console', 'error', 'looking'].includes(S.phase)) {
     if (needsFolder()) row.push(h('button', { class: 'primary', onclick: onFolderClick }, 'Choose folder'));
     else row.push(h('button', { class: 'primary', disabled: S.phase === 'looking', onclick: () => look().catch(fail) },
