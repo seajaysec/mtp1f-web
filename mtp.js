@@ -59,7 +59,8 @@ export class FieldMTP {
     this.device = device;
     this.ep = endpoints;
     this.timeoutMs = timeoutMs;
-    this.tid = 0;
+    // Each session starts its transaction IDs somewhere new, so no reply from an earlier session can match one.
+    this.tid = 0x10000 + Math.floor(Math.random() * 0x7fff0000);
   }
 
   // Open and claim the MTP interface. Busy means another app holds the Field.
@@ -90,7 +91,27 @@ export class FieldMTP {
     const out = bulk('out'), inn = bulk('in');
     const mtp = new FieldMTP(device, { number: found.number, out: out.endpointNumber, in: inn.endpointNumber,
                                        packet: out.packetSize || 512 }, timeoutMs);
+    await mtp.drain();
     return mtp;
+  }
+
+  // A transfer cut off earlier (an unplug, a closed tab) can leave the Field's reply waiting on the pipe, and the
+  // next session would read it as the answer to its own first command. Whatever is already waiting is read and
+  // dropped. A read that finds nothing is cancelled by releasing the interface, which is then claimed again.
+  async drain() {
+    for (let round = 0; round < 4096; round++) {
+      let timer;
+      const idle = new Promise((resolve) => { timer = setTimeout(() => resolve('idle'), 250); });
+      const read = this.device.transferIn(this.ep.in, CHUNK).catch(() => 'failed');
+      const got = await Promise.race([read, idle]);
+      clearTimeout(timer);
+      if (got !== 'idle' && got !== 'failed') continue;
+      await this.device.releaseInterface(this.ep.number).catch(() => {});
+      await Promise.race([read, new Promise((resolve) => setTimeout(resolve, 1000))]);
+      await this.device.claimInterface(this.ep.number);
+      return;
+    }
+    throw new FieldStalled('the Field kept sending data nobody asked for');
   }
 
   async guard(promise, what) {
@@ -127,13 +148,25 @@ export class FieldMTP {
     await this.out(new Uint8Array(view.buffer), what);
   }
 
-  // One container (data or response); zero-length packets between phases are skipped.
+  // One container (data or response) for the current transaction. Zero-length packets between phases are skipped.
+  // A container left over from an earlier transaction or session carries another transaction ID: it is read to its
+  // end and dropped. A packet that is not a container head at all (the middle of an old transfer) is dropped too.
   async container(what, onProgress) {
+    for (let dropped = 0; dropped < 4096; dropped++) {
+      const reply = await this.readContainer(what, onProgress);
+      if (reply && reply.tid === this.tid) return reply;
+    }
+    throw new FieldStalled(`the Field kept answering an earlier request during ${what}`);
+  }
+
+  async readContainer(what, onProgress) {
     let first;
     do first = await this.in(CHUNK, what); while (first.byteLength === 0);
-    if (first.byteLength < 12) throw new FieldStalled(`short reply during ${what}`);
+    if (first.byteLength < 12) return null;
     const head = new DataView(first.buffer, first.byteOffset, 12);
-    const length = u32(head, 0), type = head.getUint16(4, true), code = head.getUint16(6, true);
+    const length = u32(head, 0), type = head.getUint16(4, true), code = head.getUint16(6, true), tid = u32(head, 8);
+    if (type < 2 || type > 4 || length < 12 || (tid !== this.tid && length > 1 << 30)) return null;
+    if (tid !== this.tid) onProgress = null;
     const body = new Uint8Array(length - 12);
     body.set(first.subarray(12, Math.min(first.byteLength, length)));
     let got = first.byteLength - 12;
@@ -144,7 +177,7 @@ export class FieldMTP {
       got += more.byteLength;
       if (onProgress) onProgress(Math.min(got, body.length), body.length);
     }
-    return { type, code, body };
+    return { type, code, tid, body };
   }
 
   async response(what) {
@@ -196,8 +229,20 @@ export class FieldMTP {
     if (total % this.ep.packet === 0) await this.out(new Uint8Array(0), what);
   }
 
+  // The model and serial only label the unit. A Field that answers OK with no description (seen after an earlier
+  // request for it was cut off) still connects; the page then names the unit by its USB product.
   async deviceInfo() {
     const { data } = await this.transact(OP.GetDeviceInfo, [], 'device info', { dataIn: true });
+    if (!data || data.byteLength < 12) return null;
+    try {
+      return this.parseDeviceInfo(data);
+    } catch (error) {
+      if (error instanceof RangeError) return null;
+      throw error;
+    }
+  }
+
+  parseDeviceInfo(data) {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     let at = 8;
     [, at] = readString(view, at);
