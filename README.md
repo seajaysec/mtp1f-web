@@ -12,13 +12,15 @@ A file transfer page for the OP-1 Field. It runs in Chrome and talks to the unit
 
 You need Chrome on a computer, a USB cable, and the files you want to copy.
 
-Open the hosted page at [seajaysec.github.io/MTP1F](https://seajaysec.github.io/MTP1F/), or run it yourself:
+Run it on your own computer. From this folder:
 
 ```
 python3 -m http.server 8755 --bind 127.0.0.1
 ```
 
-Open [http://127.0.0.1:8755](http://127.0.0.1:8755). Chrome will not offer a USB device from a page opened as a file.
+Open [http://127.0.0.1:8755](http://127.0.0.1:8755) in Chrome. Chrome will not offer a USB device from a page opened as a file.
+
+A hosted copy is at [seajaysec.github.io/mtp1f-web](https://seajaysec.github.io/mtp1f-web/). Google Safe Browsing may flag it as a dangerous site: the page asks for a USB device and for a folder on your computer, and that alone can be enough for Google's automated checks. Nothing in it phishes or uploads anything. If Chrome warns, run the page locally as above.
 
 1. Press **Choose folder** and pick the folder on this computer. **Connect** appears once a folder is chosen.
 2. Connect the unit and press **Connect**. A unit that is running is asked to share its drive.

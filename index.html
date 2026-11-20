@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MTP-1F</title>
+<title>MTP-1F · file transfer for OP-1 Field</title>
+<meta name="description" content="MTP-1F is an unofficial, independent page for copying packs, firmware and logs between a folder you choose and an OP-1 Field over USB. It runs in this browser; nothing is uploaded.">
 <link rel="icon" href="data:,">
 <style>
 :root {
@@ -207,8 +208,10 @@ body.dragging main { outline: 2px dashed var(--now); outline-offset: -8px; borde
 </head>
 <body>
 <main id="app"></main>
+<noscript><p class="about">MTP-1F needs JavaScript and Chrome to reach the OP-1 Field over USB.</p></noscript>
 <div id="status" class="sr" role="status" aria-live="polite"></div>
 <footer class="about">
+  <p>MTP-1F is an unofficial, independent page for copying packs, firmware and logs between a folder you choose and your OP-1 Field over USB. It runs in this browser and reaches only the USB device and the folder you pick; nothing is uploaded.</p>
   <p>Tested on macOS with Chrome. MIT license. PRs and forks welcome. This project does not support file patching.</p>
 </footer>
 <script type="module" src="app.js"></script>
