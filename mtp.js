@@ -236,31 +236,50 @@ export class FieldMTP {
     return { capacity: Number(iv.getBigUint64(6, true)), free: Number(iv.getBigUint64(14, true)) };
   }
 
-  // Every object as {id, parent, name, kind, size}; the Field hands them over in its own order.
-  async inventory(onProgress) {
-    const { data } = await this.transact(OP.GetObjectHandles, [this.storage, 0, 0], 'listing', { dataIn: true });
+  async handles(parent) {
+    const { data } = await this.transact(OP.GetObjectHandles, [this.storage, 0, parent], 'listing', { dataIn: true });
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    const handles = Array.from({ length: u32(view, 0) }, (_, i) => u32(view, 4 + 4 * i));
+    return Array.from({ length: u32(view, 0) }, (_, i) => u32(view, 4 + 4 * i));
+  }
+
+  async objectRow(id) {
+    const info = (await this.transact(OP.GetObjectInfo, [id], 'listing', { dataIn: true })).data;
+    const iv = new DataView(info.buffer, info.byteOffset, info.byteLength);
+    let at = 52;
+    let name;
+    [name, at] = readString(iv, at);
+    let created = null;
+    let modified = null;
+    try {
+      let captured;
+      [captured, at] = readString(iv, at);
+      created = captured;
+      const [written] = readString(iv, at);
+      modified = written;
+    } catch { created = null; modified = null; }
+    const folder = iv.getUint16(4, true) === FORMAT_FOLDER;
+    return { id, parent: u32(iv, 38), name, kind: folder ? 'folder' : 'file', size: folder ? 0 : u32(iv, 8), created, modified };
+  }
+
+  // Every object as {id, parent, name, kind, size}; the Field hands them over in its own order.
+  // The boot-menu drive answers "every object" with the whole tree. The running unit's drive answers with the top
+  // level only, so each folder is also asked for its own children. An object already listed is not read again.
+  async inventory(onProgress) {
     const rows = [];
-    for (const [index, id] of handles.entries()) {
-      const info = (await this.transact(OP.GetObjectInfo, [id], 'listing', { dataIn: true })).data;
-      const iv = new DataView(info.buffer, info.byteOffset, info.byteLength);
-      let at = 52;
-      let name;
-      [name, at] = readString(iv, at);
-      let created = null;
-      let modified = null;
-      try {
-        let captured;
-        [captured, at] = readString(iv, at);
-        created = captured;
-        const [written] = readString(iv, at);
-        modified = written;
-      } catch { created = null; modified = null; }
-      const folder = iv.getUint16(4, true) === FORMAT_FOLDER;
-      rows.push({ id, parent: u32(iv, 38), name, kind: folder ? 'folder' : 'file', size: folder ? 0 : u32(iv, 8), created, modified });
-      if (onProgress) onProgress(index + 1, handles.length);
-    }
+    const seen = new Set();
+    const folders = [];
+    const take = async (ids) => {
+      const fresh = ids.filter((id) => !seen.has(id));
+      for (const [index, id] of fresh.entries()) {
+        seen.add(id);
+        const row = await this.objectRow(id);
+        rows.push(row);
+        if (row.kind === 'folder') folders.push(id);
+        if (onProgress) onProgress(rows.length, rows.length + fresh.length - index - 1);
+      }
+    };
+    await take(await this.handles(0));
+    while (folders.length) await take(await this.handles(folders.shift()));
     return rows;
   }
 
