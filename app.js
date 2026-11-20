@@ -190,7 +190,7 @@ async function confirmPackBytes(mtp) {
   const jobs = packsToConfirm();
   const locals = localFiles();
   for (const [index, row] of jobs.entries()) {
-    S.progress = { label: 'Checking ' + row.name, done: index, total: jobs.length }; render();
+    activity(`Comparing files byte for byte, ${index + 1} of ${jobs.length}`, index, jobs.length, `Compared ${jobs.length} ${jobs.length === 1 ? 'file' : 'files'} byte for byte`);
     row.digest = await sha256(await mtp.get(row.id));
     for (const file of locals) {
       const same = row.name === 'os.ldr' ? file.name && file.name.toLowerCase().endsWith('.ldr') : file.name === row.name;
@@ -218,8 +218,10 @@ async function digestOf(file) {
 }
 
 function activity(text, done, total, doneText) {
-  if (S.quiet && S.phase !== 'working') return;
-  if (S.phase !== 'working') {
+  // A copy and a connect both keep a running log; anything else only moves the progress bar.
+  const logged = S.phase === 'working' || S.phase === 'reading';
+  if (S.quiet && !logged) return;
+  if (!logged) {
     S.progress = { label: text, done: done || 0, total: Math.max(1, total || 1) };
     render();
     return;
@@ -317,20 +319,30 @@ function titleCase(name) {
   const text = String(name || '');
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
 }
+// The folder the loader reads, as this drive shows it: user/pk on the boot-menu drive, packs/ on the running
+// unit's drive. The set of packs, the limit and the judgement all belong to this folder, whichever drive it is.
+function packFolder() {
+  return (S.current && S.links && S.links.packDir) || null;
+}
+function inPackFolder(path) {
+  const dir = packFolder();
+  return !!(dir && path && String(path).startsWith(dir + '/'));
+}
 function unitHolds(file) {
-  const row = S.current && S.current['user/pk/' + file];
+  const dir = packFolder();
+  const row = dir && S.current && S.current[dir + '/' + file];
   return !!(row && row.kind === 'file');
 }
 function packMembers() {
   const items = (S.links && S.links.items || []).filter((item) => item.role === 'pack');
-  const connected = !!(S.current && S.installVolume);
+  const connected = !!(S.current && packFolder());
   const out = [];
   for (const item of items) {
     const want = packWant(item);
     const local = shownCopy(item, 'local');
     const remote = shownCopy(item, 'remote');
     const remotePath = remote && remote.path;
-    const onUnit = !!(remotePath && remotePath.startsWith('user/pk/') && S.current && S.current[remotePath] && S.current[remotePath].kind === 'file');
+    const onUnit = !!(inPackFolder(remotePath) && S.current[remotePath] && S.current[remotePath].kind === 'file');
     if (!connected) {
       if (want === 'remove' || S.packMode[item.name] === 'skip') continue;
       if (!local || stashed(item)) continue;
@@ -338,7 +350,7 @@ function packMembers() {
       continue;
     }
     if (want === 'remove') continue;
-    if (want === 'sync' && item.action === 'push' && local && String(item.remote || '').startsWith('user/pk/')) {
+    if (want === 'sync' && item.action === 'push' && local && inPackFolder(item.remote)) {
       out.push({ file: item.name, localPath: local.path, path: item.remote, onUnit, inFolder: true });
     } else if (onUnit) {
       out.push({ file: item.name, localPath: '', path: remotePath, onUnit: true, inFolder: !!local });
@@ -349,8 +361,8 @@ function packMembers() {
 // The pack files that will sit in user/pk once this sync is done: what is on the Field and stays, plus what is
 // staged, minus what is staged for removal. Only counted against a Field (the loader's limit is its folder's).
 function packRoom() {
-  const counted = !!(S.current && S.installVolume);
-  const names = counted ? packMembers().filter((member) => !member.path || member.path.startsWith('user/pk/')).map((member) => member.file) : [];
+  const counted = !!(S.current && packFolder());
+  const names = counted ? packMembers().filter((member) => !member.path || inPackFolder(member.path)).map((member) => member.file) : [];
   const limit = S.packLimit.limit;
   const count = packSetSize(names);
   return { counted, names: new Set(names.map((name) => name.toLowerCase())), count, limit, full: counted && count >= limit, over: counted && count > limit };
@@ -575,7 +587,7 @@ async function replan() {
     S.plan = null;
   }
   S.pairs = S.plan ? pairs : [];
-  if (S.current && !S.installVolume) S.settle = null;
+  if (S.current && !packFolder()) S.settle = null;
   else {
     const bodies = await packBodies();
     S.settle = bodies ? settlePacks(bodies.map((item) => ({ file: item.file, bytes: item.bytes || new Uint8Array(), onUnit: item.onUnit, inFolder: item.inFolder })), S.packLimit.limit) : null;
@@ -588,7 +600,8 @@ async function replan() {
 async function withField(job) {
   if (!S.device && navigator.usb) {
     const known = (await navigator.usb.getDevices()).filter(isField);
-    S.device = known.find((device) => (device.productId === INSTALL_PRODUCT) === S.installVolume) || null;
+    // 0x0102 is the shared drive, boot menu or running unit alike.
+    S.device = known.find((device) => device.productId === INSTALL_PRODUCT) || known[0] || null;
   }
   if (!S.device) return;
   let mtp;
@@ -719,9 +732,10 @@ async function look() {
         S.installVolume = device.productId === INSTALL_PRODUCT;
         S.info = null;
         S.phase = 'reading';
+        S.activity = [];
         render();
         const ok = await withField(async () => {});
-        if (ok) { S.looking = false; S.phase = 'ready'; S.message = ''; S.rebootNames = new Set(); S.sentFirmware = false; S.activity = []; await replan(); return; }
+        if (ok) { S.looking = false; S.phase = 'ready'; S.message = ''; S.rebootNames = new Set(); S.sentFirmware = false; await replan(); return; }
         if (S.phase === 'busy' || S.phase === 'stalled' || S.phase === 'error') { S.looking = false; return; }
         if (device.productId === INSTALL_PRODUCT) { S.looking = false; return; }
         tried.add(key(device));
@@ -1026,7 +1040,7 @@ function dialogView() {
 
 // The scarce thing is pack slots, so they are the picture: kept on the Field, added by this sync, over the limit.
 function slotStrip(room) {
-  const members = packMembers().filter((member) => !member.path || member.path.startsWith('user/pk/'));
+  const members = packMembers().filter((member) => !member.path || inPackFolder(member.path));
   const kept = new Set(members.filter((member) => member.onUnit).map((member) => member.file.toLowerCase())).size;
   const added = room.count - kept;
   const cells = Math.max(room.limit, room.count);
@@ -1213,7 +1227,7 @@ function wrongOs(item) {
 // Packs already on the Field that were built for another OS than the loader's. Loading a new OS is when this
 // matters most: the new loader leaves every one of them out, and they keep using pack slots.
 function staleFieldPacks() {
-  if (!S.current || !S.installVolume) return [];
+  if (!S.current || !packFolder()) return [];
   const remote = (S.links && S.links.items || []).filter((item) => item.role === 'pack' && sideCopies(item, 'remote').length && packWant(item) !== 'remove'
     && !sideCopies(item, 'local').some((copy) => copy.os === LOADER_OS));
   const rows = remote.map((item) => {
